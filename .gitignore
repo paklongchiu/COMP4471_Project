@@ -1,0 +1,8 @@
+# Dependency directories
+node_modules/
+
+# Mac OS system files (junk)
+.DS_Store
+
+# Environment variables (secrets)
+.env
