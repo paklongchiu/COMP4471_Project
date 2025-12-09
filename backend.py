@@ -4,6 +4,8 @@ from fastapi.responses import StreamingResponse
 import torch
 import torchvision
 from torchvision.models.detection import fasterrcnn_resnet50_fpn, maskrcnn_resnet50_fpn
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 from PIL import Image
 import io
 import json
@@ -20,16 +22,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+SELECTED_CLASSES = [
+    '__background__',
+    'person', 'car', 'dog', 'cat', 'bus', 'truck', 'bicycle', 'motorcycle', 'bench',
+    'bird', 'horse', 'sheep', 'cow', 'elephant', 'traffic light', 'stop sign',
+    'fire hydrant', 'boat', 'train', 'airplane'
+]
+
+NUM_CLASSES = len(SELECTED_CLASSES)
+
 # Load models (do this once at startup)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# Faster R-CNN for object detection
+# For Faster R-CNN
 faster_rcnn = fasterrcnn_resnet50_fpn(weights='DEFAULT')
+in_features = faster_rcnn.roi_heads.box_predictor.cls_score.in_features
+faster_rcnn.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(in_features, NUM_CLASSES)
+faster_rcnn.load_state_dict(torch.load('models/faster_rcnn_weights.pth', map_location=device))
 faster_rcnn.to(device)
 faster_rcnn.eval()
 
-# Mask R-CNN for segmentation
+# For Mask R-CNN
 mask_rcnn = maskrcnn_resnet50_fpn(weights='DEFAULT')
+in_features = mask_rcnn.roi_heads.box_predictor.cls_score.in_features
+mask_rcnn.roi_heads.box_predictor = FastRCNNPredictor(in_features, NUM_CLASSES)
+in_features_mask = mask_rcnn.roi_heads.mask_predictor.conv5_mask.in_channels
+hidden_layer = 256
+mask_rcnn.roi_heads.mask_predictor = MaskRCNNPredictor(
+    in_features_mask, hidden_layer, NUM_CLASSES
+)
+mask_rcnn.load_state_dict(torch.load('models/mask_rcnn_weights.pth', map_location=device))
 mask_rcnn.to(device)
 mask_rcnn.eval()
 
@@ -68,7 +90,7 @@ async def detect_objects(file: UploadFile = File(...)):
         predictions = faster_rcnn(image_tensor)[0]
     
     # Filter predictions by confidence threshold
-    threshold = 0.7
+    threshold = 0.1
     boxes = predictions['boxes'][predictions['scores'] > threshold].cpu().numpy()
     labels = predictions['labels'][predictions['scores'] > threshold].cpu().numpy()
     scores = predictions['scores'][predictions['scores'] > threshold].cpu().numpy()
@@ -80,9 +102,11 @@ async def detect_objects(file: UploadFile = File(...)):
     objects = []
     for i, (box, label, score) in enumerate(zip(boxes, labels, scores)):
         x1, y1, x2, y2 = box
+        class_name = SELECTED_CLASSES[label] if label < len(SELECTED_CLASSES) else 'unknown'
+        
         objects.append({
             'id': i + 1,
-            'label': COCO_CLASSES[label],
+            'label': class_name,
             'confidence': float(score),
             'bbox': [
                 float(x1 / width),   # normalized x1
@@ -120,7 +144,7 @@ async def segment_objects(
         predictions = mask_rcnn(image_tensor)[0]
     
     # Filter by confidence threshold
-    threshold = 0.7
+    threshold = 0.5
     masks = predictions['masks'][predictions['scores'] > threshold].cpu().numpy()
     scores = predictions['scores'][predictions['scores'] > threshold].cpu().numpy()
     
@@ -161,4 +185,3 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=3000)
-    
